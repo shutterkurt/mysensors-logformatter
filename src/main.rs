@@ -1,6 +1,4 @@
-#[macro_use]
-extern crate clap;
-use clap::{App, Arg, ArgMatches};
+use clap::Parser;
 use ctrlc;
 use logwatcher::{LogWatcher, LogWatcherAction, StartFrom};
 use mysensors_logparser;
@@ -8,38 +6,20 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-fn setup_args<'a>() -> ArgMatches<'a> {
-    App::new("parse stream of MySensor logs")
-        .version(crate_version!())
-        .arg(
-            Arg::with_name("logfile")
-                .short("l")
-                .long("logfile")
-                .value_name("logfile to convert or watch")
-                .takes_value(true)
-                .required(false),
-        )
-        .arg(
-            Arg::with_name("follow")
-                .short("f")
-                .long("follow")
-                .value_name("follow logfile like 'tail -f <logfile>'"),
-        )
-        .arg(
-            Arg::with_name("discover")
-                .short("d")
-                .long("discover")
-                .value_name("discover"),
-        )
-        .arg(
-            Arg::with_name("timeout")
-                .short("t")
-                .long("timeout")
-                .value_name("timeout")
-                .takes_value(true)
-                .required(false),
-        )
-        .get_matches()
+#[derive(Parser, Debug)]
+#[clap(author, version, about)]
+struct Cli {
+    /// continue to follow the logfile (use ctrl-C to quit)
+    #[clap(short, long)]
+    follow: bool,
+
+    ///when following, dump whole file, then start following
+    #[clap(short, long)]
+    beginning: bool,
+
+    /// name of the logfile to format
+    #[clap(short, long)]
+    logfile: String,
 }
 
 fn parse_file(filename: &str) -> Result<(), std::io::Error> {
@@ -49,45 +29,44 @@ fn parse_file(filename: &str) -> Result<(), std::io::Error> {
 
     for line in buffered.lines() {
         //parse and print each line in the file
-        println!("{}", mysensors_logparser::parse_log_line(&line?));
+        match line {
+            Ok(l) => println!("{}", mysensors_logparser::parse_log_line(&l)),
+            Err(e) => println!("error reading line: {}", e),
+        }
     }
 
     Ok(())
 }
 
 fn main() {
-    // -l/--logfile -t/--timeout  -o/--output
-    let cli = setup_args();
+    let cli = Cli::parse();
+    println!("{:#?}\n\n\n", cli);
 
     ctrlc::set_handler(move || {
-        println!("Ctrl-C detected, bye bye");
+        println!("\nCtrl-C detected, bye bye");
         std::process::exit(0) //exit OK (zero)
     })
     .expect("Error setting Ctrl-C handler");
 
-    if let Some(logfile) = cli.value_of("logfile") {
-        if let Some(_follow) = cli.value_of("follow") {
-            // if following logfile, continuously watch for changes and parse
-            let mut log_watcher = LogWatcher::register(logfile, StartFrom::Beginning).unwrap();
-            log_watcher.watch(&mut move |_pos, _len, line: String| {
-                println!("{}", mysensors_logparser::parse_log_line(&line));
-                LogWatcherAction::None
-            })
+    if cli.follow {
+        // if following logfile, continuously watch for changes and parse
+        let mut log_watcher;
+        // either dump whole file or just start watching for changes
+        if cli.beginning {
+            log_watcher = LogWatcher::register(cli.logfile, StartFrom::Beginning).unwrap();
         } else {
-            //just iterate across logfile and parse each line
-            match parse_file(logfile) {
-                Ok(_) => (),
-                Err(e) => panic!("{}", e),
-            };
+            log_watcher = LogWatcher::register(cli.logfile, StartFrom::End).unwrap();
         }
-    // } else if let Some(_discover) = cli.value_of("discover") {
-    //     //get the serial ports and print out their info
-    //     match serialport::available_ports() {
-    //         Ok(infos) => print!(":?", infos),
-    //         Err(e) => print!("error getting serial port infos: {}", e),
-    //     }
+        //actually watch for changes and parse/format each new line
+        log_watcher.watch(&mut move |_pos, _len, line: String| {
+            println!("{}", mysensors_logparser::parse_log_line(&line));
+            LogWatcherAction::None
+        })
     } else {
-        println!("no logfile given, nothing to do!");
-        println!("use --help to show how to use");
+        //just iterate across logfile and parse each line
+        match parse_file(&cli.logfile) {
+            Ok(_) => (),
+            Err(e) => panic!("{}", e),
+        };
     }
 }
